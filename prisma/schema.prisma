@@ -1,0 +1,481 @@
+// ============================================================================
+// Gadaa Betting — Domain Schema
+// ----------------------------------------------------------------------------
+// Sandbox note: this environment runs SQLite. In production (PostgreSQL):
+//   * String statuses -> native Prisma enums
+//   * *Json String fields -> Json columns
+//   * add partial indexes (e.g. WHERE status = 'OPEN') and SELECT ... FOR UPDATE
+//     row locks in wallet operations (wallet.ts documents the swap point)
+// All money is stored as INTEGER cents (ETB santim) to avoid float errors.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Users, auth, KYC
+// ----------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(cuid())
+  phone         String   @unique // normalized +2519XXXXXXXX
+  email         String?
+  passwordHash  String
+  fullName      String
+  dateOfBirth   String? // ISO date; 18+ enforced at registration & KYC
+  role          String   @default("USER") // USER | SUPPORT | FINANCE | ADMIN | SUPER_ADMIN
+  status        String   @default("ACTIVE") // ACTIVE | SUSPENDED | BANNED
+  phoneVerified Boolean  @default(false)
+  language      String   @default("en") // en | am | om
+  referralCode  String   @unique
+  referredById   String?
+  referredBy     User?      @relation("ReferralTree", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals      User[]     @relation("ReferralTree")
+  referralsMade  Referral[] @relation("Referrer")
+  referralReward Referral?  @relation("Referee")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  wallet          Wallet?
+  kycDocuments    KycDocument[]
+  bets            Bet[]
+  transactions    Transaction[]
+  deposits        Deposit[]
+  withdrawals     Withdrawal[]
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+  bonusGrants     BonusGrant[]
+  limits          ResponsibleLimit?
+  selfExclusions  SelfExclusion[]
+  sessions        Session?
+  passwordResets  PasswordReset[]
+
+  @@index([status])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ip           String?
+  userAgent    String?
+  lastSeenAt   DateTime @default(now())
+  loginCount   Int      @default(1) // brute-force / multi-account signal
+  createdAt    DateTime @default(now())
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  code      String // hashed OTP code
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, used])
+}
+
+model OtpCode {
+  id        String   @id @default(cuid())
+  phone     String
+  code      String // in production store hashed; sandbox returns it in dev response
+  purpose   String // PHONE_VERIFY | PASSWORD_RESET
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([phone, purpose, used])
+}
+
+model KycDocument {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  docType       String // FAYDA | NATIONAL_ID | PASSPORT | DRIVING_LICENSE
+  docNumber     String
+  dateOfBirth   String?
+  frontImage    String // data URL (sandbox); move to object storage in production
+  backImage     String?
+  status        String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewerNote  String?
+  reviewedById  String?
+  reviewedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([userId, status])
+  @@index([status])
+}
+
+// ----------------------------------------------------------------------------
+// Wallet, double-entry ledger, payment transactions
+// ----------------------------------------------------------------------------
+
+model Wallet {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency     String   @default("ETB")
+  balanceCents Int      @default(0) // withdrawable / stakeable real money
+  bonusCents   Int      @default(0) // informational bonus ledger balance
+  lockedCents  Int      @default(0) // held for pending withdrawals
+  version      Int      @default(0) // optimistic concurrency token
+  updatedAt    DateTime @updatedAt
+
+  ledgerEntries LedgerEntry[]
+}
+
+// Double-entry style ledger: every balance mutation writes a row with
+// before/after balances and the counter-account it moved against.
+model LedgerEntry {
+  id                 String   @id @default(cuid())
+  walletId           String
+  wallet             Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  entryType          String // DEPOSIT | WITHDRAWAL_HOLD | WITHDRAWAL_SETTLE | WITHDRAWAL_REFUND | BET_STAKE | BET_WIN | BET_REFUND | CASHOUT | BONUS | MANUAL_ADJUST
+  direction          String // DEBIT | CREDIT (from the wallet's perspective)
+  amountCents        Int
+  balanceBeforeCents Int
+  balanceAfterCents  Int
+  counterAccount     String // HOUSE_MAIN | HOUSE_PENDING_WITHDRAWAL | PROMO_BONUS | PAYMENTS_CHAPA
+  refType            String? // bet | deposit | withdrawal | bonus | admin
+  refId              String?
+  description        String?
+  createdAt          DateTime @default(now())
+
+  @@index([walletId, createdAt])
+  @@index([entryType, createdAt])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String // DEPOSIT | WITHDRAWAL | BET | WIN | REFUND | CASHOUT | BONUS | ADJUSTMENT
+  status      String   @default("PENDING") // PENDING | SUCCESS | FAILED | REFUNDED
+  amountCents Int
+  currency    String   @default("ETB")
+  reference   String? // Chapa tx_ref (unique per payment)
+  provider    String? // CHAPA | INTERNAL
+  providerRef String?
+  description String?
+  metaJson    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([reference])
+  @@index([userId, createdAt])
+  @@index([type, status])
+}
+
+model Deposit {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  txRef       String    @unique // idempotency key — never credit twice
+  amountCents Int
+  currency    String    @default("ETB")
+  status      String    @default("PENDING") // PENDING | SUCCESS | FAILED
+  providerRef String?
+  checkoutUrl String?
+  creditedAt  DateTime?
+  metaJson    String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model Withdrawal {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountCents   Int
+  feeCents      Int       @default(0)
+  method        String // TELEBIRR | CBE_BIRR | BANK
+  accountName   String
+  accountNumber String
+  bankName      String?
+  status        String    @default("PENDING") // PENDING | PROCESSING | PAID | REJECTED | FAILED
+  adminNote     String?
+  processedById String?
+  processedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, status])
+  @@index([status])
+}
+
+// ----------------------------------------------------------------------------
+// Sportsbook: sports, leagues, teams, events, markets, selections
+// ----------------------------------------------------------------------------
+
+model Sport {
+  id        String   @id @default(cuid())
+  key       String   @unique // football | basketball | ...
+  name      String
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  leagues   League[]
+  teams     Team[]
+  events    Event[]
+}
+
+model League {
+  id         String  @id @default(cuid())
+  sportId    String
+  sport      Sport   @relation(fields: [sportId], references: [id], onDelete: Cascade)
+  name       String
+  country    String?
+  season     String?
+  externalId String? @unique
+  active     Boolean @default(true)
+  events     Event[]
+
+  @@index([sportId])
+}
+
+model Team {
+  id         String  @id @default(cuid())
+  sportId    String
+  sport      Sport   @relation(fields: [sportId], references: [id], onDelete: Cascade)
+  name       String
+  shortName  String?
+  externalId String? @unique
+  eventsHome Event[] @relation("HomeTeam")
+  eventsAway Event[] @relation("AwayTeam")
+
+  @@index([sportId, name])
+}
+
+model Event {
+  id          String    @id @default(cuid())
+  sportId     String
+  sport       Sport     @relation(fields: [sportId], references: [id], onDelete: Cascade)
+  leagueId    String
+  league      League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  homeTeamId  String
+  homeTeam    Team      @relation("HomeTeam", fields: [homeTeamId], references: [id], onDelete: Cascade)
+  awayTeamId  String
+  awayTeam    Team      @relation("AwayTeam", fields: [awayTeamId], references: [id], onDelete: Cascade)
+  startTime   DateTime
+  status      String    @default("SCHEDULED") // SCHEDULED | LIVE | FINISHED | POSTPONED | CANCELLED
+  minute      Int?
+  homeScore   Int?
+  awayScore   Int?
+  featured    Boolean   @default(false)
+  provider    String    @default("mock") // mock | api-football | manual
+  externalId  String?   @unique
+  resultJson  String? // settlement notes (winning selections per market)
+  settledAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  markets Market[]
+  betLegs BetLeg[]
+
+  @@index([status, startTime])
+  @@index([leagueId, status, startTime])
+  @@index([startTime])
+}
+
+model Market {
+  id        String   @id @default(cuid())
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  key       String // 1X2 | DOUBLE_CHANCE_1X | OVER_UNDER_2_5 | BTTS | HANDICAP_-1
+  name      String
+  line      Float?
+  status    String   @default("OPEN") // OPEN | SUSPENDED | SETTLED
+  resultName String? // winning selection name after settlement
+  sortOrder Int      @default(0)
+  settledAt DateTime?
+  suspendedAt DateTime?
+  selections Selection[]
+  betLegs    BetLeg[]
+
+  @@index([eventId, status])
+}
+
+model Selection {
+  id         String  @id @default(cuid())
+  marketId   String
+  market     Market  @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  name       String // 1 | X | 2 | 1X | 12 | X2 | OVER | UNDER | YES | NO | HOME | AWAY
+  odds       Float
+  prevOdds   Float?
+  status     String  @default("ACTIVE") // ACTIVE | SUSPENDED
+  externalId String?
+  betLegs    BetLeg[]
+
+  @@index([marketId])
+}
+
+// ----------------------------------------------------------------------------
+// Bets
+// ----------------------------------------------------------------------------
+
+model Bet {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String // SINGLE | MULTIPLE | SYSTEM
+  systemK           Int? // for SYSTEM bets: combination size (e.g. 2 = doubles)
+  stakeCents        Int // total outlay (for SYSTEM: stakePerCombo * comboCount)
+  stakePerComboCents Int?
+  comboCount        Int       @default(1)
+  totalOdds         Float
+  potentialWinCents Int
+  status            String    @default("OPEN") // PENDING_ACCEPTANCE | OPEN | WON | LOST | CASHED_OUT | VOID | REJECTED
+  cashoutOfferCents Int?
+  settledAt         DateTime?
+  placementIp       String?
+  metaJson          String?
+  liveAcceptAt      DateTime? // live bets: acceptance delay deadline
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  legs BetLeg[]
+
+  @@index([userId, status, createdAt])
+  @@index([status])
+}
+
+model BetLeg {
+  id             String    @id @default(cuid())
+  betId          String
+  bet            Bet       @relation(fields: [betId], references: [id], onDelete: Cascade)
+  eventId        String
+  event          Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  marketId       String
+  market         Market    @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  selectionId    String
+  selection      Selection @relation(fields: [selectionId], references: [id], onDelete: Cascade)
+  // denormalized snapshot for immutable history
+  eventName      String
+  marketName     String
+  marketKey      String
+  selectionName  String
+  oddsAtPlacement Float
+  line           Float?
+  status         String    @default("OPEN") // OPEN | WON | LOST | VOID
+  settledAt      DateTime?
+
+  @@index([eventId])
+  @@index([betId])
+}
+
+// ----------------------------------------------------------------------------
+// Promotions, responsible gambling, platform config, ops
+// ----------------------------------------------------------------------------
+
+model Bonus {
+  id              String   @id @default(cuid())
+  name            String
+  type            String // WELCOME | REFERRAL | DEPOSIT | MANUAL
+  percent         Int? // e.g. 100 = 100% match
+  maxAmountCents  Int?
+  fixedCents      Int?
+  minDepositCents Int?
+  minOdds         Float?
+  active          Boolean  @default(true)
+  description     String?
+  createdAt       DateTime @default(now())
+  grants          BonusGrant[]
+
+  @@index([type, active])
+}
+
+model BonusGrant {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bonusId   String?
+  bonus     Bonus?   @relation(fields: [bonusId], references: [id], onDelete: SetNull)
+  amountCents Int
+  status    String   @default("CREDITED") // CREDITED | PENDING | CANCELLED
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Referral {
+  id            String   @id @default(cuid())
+  referrerId    String
+  referrer      User     @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  refereeId     String   @unique
+  referee       User     @relation("Referee", fields: [refereeId], references: [id], onDelete: Cascade)
+  rewardedCents Int      @default(0)
+  status        String   @default("PENDING") // PENDING | REWARDED
+  createdAt     DateTime @default(now())
+
+  @@index([referrerId])
+}
+
+model ResponsibleLimit {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dailyDepositLimitCents Int?
+  dailyStakeLimitCents   Int?
+  lossLimitCents         Int?
+  coolingOffUntil        DateTime?
+  updatedAt              DateTime @updatedAt
+}
+
+model SelfExclusion {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  from      DateTime @default(now())
+  until     DateTime
+  reason    String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId, active])
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  valueJson String
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorId     String? // admin user (or null for system actions)
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorPhone  String?
+  action      String // USER_BAN | KYC_APPROVE | WITHDRAWAL_APPROVE | ODDS_UPDATE | ...
+  entity      String? // user | withdrawal | event | market | selection ...
+  entityId    String?
+  detailsJson String?
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // BET_SETTLED | DEPOSIT | WITHDRAWAL | KYC | BONUS | SYSTEM
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read, createdAt])
+}
