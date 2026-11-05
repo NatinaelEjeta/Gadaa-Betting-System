@@ -16,7 +16,7 @@ export function getSocket(): Socket {
       path: "/",
       transports: ["websocket", "polling"],
       reconnection: true,
-      reconnectionAttempts: Infinity,
+      reconnectionAttempts: 5,
       reconnectionDelay: 1500,
       timeout: 8000,
     });
