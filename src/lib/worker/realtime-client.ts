@@ -33,6 +33,7 @@ export function getRealtimeSocket(): Socket {
 
 /** Broadcast an event payload to a room. Safe no-op when the hub is down. */
 export function emitToRoom(room: string, event: string, data: unknown) {
+  if (!process.env.REALTIME_URL) return;
   try {
     const s = getRealtimeSocket();
     if (s.connected) {
