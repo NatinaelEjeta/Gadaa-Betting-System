@@ -21,9 +21,9 @@ Demo accounts (from the seed):
 
 | Role        | Phone         | Password      |
 | ----------- | ------------- | ------------- |
-| Super Admin | +251911000000 | Admin@1234    |
-| Finance     | +251911000002 | Finance@1234  |
-| Support     | +251911000003 | Support@1234  |
+| Super Admin | +251911000000 | (private)    |
+| Finance     | +251911000002 | (private)  |
+| Support     | +251911000003 | (private)  |
 | Player      | +251911000001 | Test@1234 (500 ETB) |
 
 Deposits run through a simulated Chapa checkout (test mode) — complete it and
@@ -141,3 +141,5 @@ session tracking) · provider API keys in env only.
 - Unit tests for wallet/settlement logic were intentionally omitted in this
   environment; the modules are pure-function friendly (`computeMarketOutcome`,
   `slipTotals`, `combinations`) and test-ready.
+
+Demo player (fake money): +251911000001 / Test@1234
