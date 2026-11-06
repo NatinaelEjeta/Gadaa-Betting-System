@@ -10,6 +10,8 @@ Demo player login (fake money, simulated matches and payments):
 - Password: `Test@1234`
 
 > This is a demo. No real money is used. Matches, odds and payments are simulated.
+>
+> Note: the live demo runs on serverless hosting, so the background worker (live scores and automatic bet settlement) is not running there. Run it locally with `ENABLE_WORKER=true` to see the full flow.
 
 
 A production-grade sports betting platform for the Ethiopian market: live odds,
