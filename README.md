@@ -1,5 +1,17 @@
 # Gadaa Betting 🇪🇹
 
+## Live demo
+
+**[https://gadaabettingsystem.vercel.app/](https://gadaabettingsystem.vercel.app/)**
+
+Demo player login (fake money, simulated matches and payments):
+
+- Phone: `+251911000001`
+- Password: `Test@1234`
+
+> This is a demo. No real money is used. Matches, odds and payments are simulated.
+
+
 A production-grade sports betting platform for the Ethiopian market: live odds,
 single/multi/system bets, Chapa payments (telebirr / CBE Birr / banks), a
 double-entry wallet, an automated settlement engine and a full admin panel.
